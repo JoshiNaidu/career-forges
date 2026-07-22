@@ -1,0 +1,125 @@
+name: Build macOS (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g., v0.1.2)"
+        required: true
+        type: string
+
+      upload_to_release:
+        description: "Upload to release assets"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust Dependencies
+        uses: swatinem/rust-cache@v2
+
+      - name: Install Dependencies
+        run: |
+          cd app
+          npm ci
+
+      - name: Build Tauri App
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cd app
+          npm run tauri build
+
+      - name: Show Generated Bundle Files
+        run: |
+          find app/src-tauri/target/release/bundle -type f
+
+      - name: Generate latest-darwin-x86_64.json
+        shell: bash
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.event.inputs.version }}
+          GITHUB_EVENT_RELEASE_BODY: "Manual macOS build"
+          GITHUB_EVENT_RELEASE_PUBLISHED_AT: ${{ github.event.repository.updated_at }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          SIG_FILE=$(find app/src-tauri/target/release/bundle -type f \
+            \( -name "*.app.tar.gz.sig" -o -name "*.tar.gz.sig" \) \
+            | head -n 1)
+
+          if [ -z "${SIG_FILE:-}" ]; then
+            echo "ERROR: No macOS updater signature file found."
+            find app/src-tauri/target/release/bundle -type f
+            exit 1
+          fi
+
+          UPDATER_FILE="${SIG_FILE%.sig}"
+          UPDATER_NAME="$(basename "$UPDATER_FILE")"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${UPDATER_NAME}"
+
+          export VERSION SIG_FILE DOWNLOAD_URL GITHUB_EVENT_RELEASE_BODY GITHUB_EVENT_RELEASE_PUBLISHED_AT
+          node - <<'EOF'
+          const fs = require("fs");
+          const sig = fs.readFileSync(process.env.SIG_FILE, "utf8").trim();
+          const out = {
+            version: process.env.VERSION,
+            notes: process.env.GITHUB_EVENT_RELEASE_BODY || "",
+            pub_date: process.env.GITHUB_EVENT_RELEASE_PUBLISHED_AT,
+            platforms: {
+              "darwin-x86_64": {
+                signature: sig,
+                url: process.env.DOWNLOAD_URL
+              }
+            }
+          };
+          fs.writeFileSync("latest-darwin-x86_64.json", JSON.stringify(out, null, 2));
+          console.log("Generated latest-darwin-x86_64.json");
+          EOF
+
+      - name: Upload to Release (Optional)
+        if: ${{ github.event.inputs.upload_to_release == 'true' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          files: |
+            latest-darwin-x86_64.json
+            app/src-tauri/target/release/bundle/**/*.dmg
+            app/src-tauri/target/release/bundle/**/*.app.tar.gz
+            app/src-tauri/target/release/bundle/**/*.sig
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-builds
+          path: |
+            latest-darwin-x86_64.json
+            app/src-tauri/target/release/bundle/**/*.dmg
+            app/src-tauri/target/release/bundle/**/*.app.tar.gz
+            app/src-tauri/target/release/bundle/**/*.sig
