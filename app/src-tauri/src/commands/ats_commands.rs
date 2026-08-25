@@ -319,7 +319,11 @@ pub async fn generate_ats_resume_queued(
         .map_err(|e| e.to_string())?
         .ok_or("Resume not found")?;
 
-    let label = format!("ATS Resume: {} at {}", job.title, job.company);
+        let label = format!(
+        "ATS Resume: {} at {}",
+        job.title,
+        job.company.as_deref().unwrap_or("Unknown Company"),
+    );
 
     let task = BackgroundTaskRepository::create(
         &pool,
@@ -333,6 +337,8 @@ pub async fn generate_ats_resume_queued(
     .map_err(|e| e.to_string())?;
 
     let task_id = task.id.clone();
+    let task_id_for_spawn = task_id.clone();
+
     let app_clone = app.clone();
     let pool_clone = pool.inner().clone();
     let job_id_clone = job_id.clone();
@@ -340,16 +346,16 @@ pub async fn generate_ats_resume_queued(
 
     tauri::async_runtime::spawn(async move {
         let pool = pool_clone;
-        let _ = BackgroundTaskRepository::update_status(&pool, &task_id, "running").await;
-        let _ = app_clone.emit("background-task-updated", &task_id);
+        let _ = BackgroundTaskRepository::update_status(&pool, &task_id_for_spawn, "running").await;
+        let _ = app_clone.emit("background-task-updated", &task_id_for_spawn);
 
-        let _ = BackgroundTaskRepository::update_progress(&pool, &task_id, 25, Some(1)).await;
+        let _ = BackgroundTaskRepository::update_progress(&pool, &task_id_for_spawn, 25, Some(1)).await;
 
         let job = match JobRepository::get_by_id(&pool, &job_id_clone).await {
             Ok(Some(j)) => j,
             _ => {
-                let _ = BackgroundTaskRepository::set_error(&pool, &task_id, "Job not found").await;
-                let _ = app_clone.emit("background-task-updated", &task_id);
+                let _ = BackgroundTaskRepository::set_error(&pool, &task_id_for_spawn, "Job not found").await;
+                let _ = app_clone.emit("background-task-updated", &task_id_for_spawn);
                 return;
             }
         };
@@ -357,8 +363,8 @@ pub async fn generate_ats_resume_queued(
         let resume = match ResumeRepository::get_by_id(&pool, &resume_id_clone).await {
             Ok(Some(r)) => r,
             _ => {
-                let _ = BackgroundTaskRepository::set_error(&pool, &task_id, "Resume not found").await;
-                let _ = app_clone.emit("background-task-updated", &task_id);
+                let _ = BackgroundTaskRepository::set_error(&pool, &task_id_for_spawn, "Resume not found").await;
+                let _ = app_clone.emit("background-task-updated", &task_id_for_spawn);
                 return;
             }
         };
@@ -366,13 +372,13 @@ pub async fn generate_ats_resume_queued(
         let master_json = match resume.master_resume_json.as_deref() {
             Some(j) => j.to_string(),
             None => {
-                let _ = BackgroundTaskRepository::set_error(&pool, &task_id, "Resume has no master data").await;
-                let _ = app_clone.emit("background-task-updated", &task_id);
+                let _ = BackgroundTaskRepository::set_error(&pool, &task_id_for_spawn, "Resume has no master data").await;
+                let _ = app_clone.emit("background-task-updated", &task_id_for_spawn);
                 return;
             }
         };
 
-        let _ = BackgroundTaskRepository::update_progress(&pool, &task_id, 50, Some(2)).await;
+        let _ = BackgroundTaskRepository::update_progress(&pool, &task_id_for_spawn, 50, Some(2)).await;
 
         let job_desc = job.description.unwrap_or_else(|| "No description available".to_string());
         let model = "llama3.2:1b";
@@ -380,13 +386,13 @@ pub async fn generate_ats_resume_queued(
         let optimized = match AtsGenerator::generate_optimized_resume(&master_json, &job_desc, model).await {
             Ok(o) => o,
             Err(e) => {
-                let _ = BackgroundTaskRepository::set_error(&pool, &task_id, &format!("AI generation failed: {}", e)).await;
-                let _ = app_clone.emit("background-task-updated", &task_id);
+                let _ = BackgroundTaskRepository::set_error(&pool, &task_id_for_spawn, &format!("AI generation failed: {}", e)).await;
+                let _ = app_clone.emit("background-task-updated", &task_id_for_spawn);
                 return;
             }
         };
 
-        let _ = BackgroundTaskRepository::update_progress(&pool, &task_id, 75, Some(3)).await;
+        let _ = BackgroundTaskRepository::update_progress(&pool, &task_id_for_spawn, 75, Some(3)).await;
 
         let master_value = serde_json::from_str::<serde_json::Value>(&master_json)
             .unwrap_or_else(|_| json!({ "raw": master_json }));
@@ -434,15 +440,15 @@ pub async fn generate_ats_resume_queued(
         ).await {
             Ok(g) => g,
             Err(e) => {
-                let _ = BackgroundTaskRepository::set_error(&pool, &task_id, &format!("DB save failed: {}", e)).await;
-                let _ = app_clone.emit("background-task-updated", &task_id);
+                let _ = BackgroundTaskRepository::set_error(&pool, &task_id_for_spawn, &format!("DB save failed: {}", e)).await;
+                let _ = app_clone.emit("background-task-updated", &task_id_for_spawn);
                 return;
             }
         };
 
-        let _ = BackgroundTaskRepository::set_result(&pool, &task_id, &format!("{}", generated.id)).await;
-        let _ = app_clone.emit("background-task-updated", &task_id);
-        let _ = app_clone.emit("resume-ready", json!({ "taskId": task_id, "resumeId": generated.id, "jobTitle": job.title }));
+        let _ = BackgroundTaskRepository::set_result(&pool, &task_id_for_spawn, &format!("{}", generated.id)).await;
+        let _ = app_clone.emit("background-task-updated", &task_id_for_spawn);
+        let _ = app_clone.emit("resume-ready", json!({ "taskId": task_id_for_spawn, "resumeId": generated.id, "jobTitle": job.title }));
     });
 
     Ok(task_id)

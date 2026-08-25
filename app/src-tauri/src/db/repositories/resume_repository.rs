@@ -28,6 +28,27 @@ pub struct Resume {
 pub struct ResumeRepository;
 
 impl ResumeRepository {
+
+    fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Resume> {
+        Ok(Resume {
+            id: row.get(0)?,
+            user_id: row.get(1)?,
+            filename: row.get(2)?,
+            file_path: row.get(3)?,
+            file_size: row.get(4)?,
+            mime_type: row.get(5)?,
+            parsed_content: row.get(6)?,
+            hash: row.get(7)?,
+            is_default: row.get::<_, i32>(8)? != 0,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            master_resume_json: row.get(11)?,
+            ats_score: row.get(12)?,
+            ats_strengths: row.get(13)?,
+            ats_weaknesses: row.get(14)?,
+            ats_recommendations: row.get(15)?,
+        })
+    }
     /*
         CREATE
     */

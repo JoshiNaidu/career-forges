@@ -75,10 +75,10 @@ impl BackgroundTaskRepository {
             current_step: None,
             error_message: None,
             result_data: None,
-            created_at: now,
+            created_at: now.clone(),
+            updated_at: now,
             started_at: None,
             completed_at: None,
-            updated_at: now,
         })
     }
 

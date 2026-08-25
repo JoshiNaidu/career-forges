@@ -1,0 +1,108 @@
+name: Release Windows
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.13.0"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust Dependencies
+        uses: swatinem/rust-cache@v2
+
+      - name: Install Dependencies
+        run: |
+          cd app
+          npm ci
+
+      - name: Build Tauri App
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cd app
+          npm run tauri build
+
+      - name: Generate latest-windows-x86_64.json
+        shell: bash
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_EVENT_RELEASE_BODY: ${{ github.event.release.body }}
+          GITHUB_EVENT_RELEASE_PUBLISHED_AT: ${{ github.event.release.published_at }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          SIG_FILE=$(find app/src-tauri/target/release/bundle -type f \
+            \( -name "*.exe.sig" -o -name "*.msi.zip.sig" \) \
+            | head -n 1)
+
+          if [ -z "${SIG_FILE:-}" ]; then
+            echo "ERROR: No Windows updater signature file found."
+            exit 1
+          fi
+
+          UPDATER_FILE="${SIG_FILE%.sig}"
+          UPDATER_NAME="$(basename "$UPDATER_FILE")"
+
+          export VERSION
+          export SIG_FILE
+          export UPDATER_NAME
+          export GITHUB_REPOSITORY
+          export GITHUB_REF_NAME
+          export GITHUB_EVENT_RELEASE_BODY
+          export GITHUB_EVENT_RELEASE_PUBLISHED_AT
+
+          node - <<'EOF'
+          const fs = require("fs");
+          const sig = fs.readFileSync(process.env.SIG_FILE, "utf8").trim();
+          const url = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.GITHUB_REF_NAME}/${process.env.UPDATER_NAME}`;
+          const out = {
+            version: process.env.VERSION,
+            notes: process.env.GITHUB_EVENT_RELEASE_BODY || "",
+            pub_date: process.env.GITHUB_EVENT_RELEASE_PUBLISHED_AT,
+            platforms: {
+              "windows-x86_64": {
+                signature: sig,
+                url
+              },
+              "windows-x86_64-msvc": {
+                signature: sig,
+                url
+              }
+            }
+          };
+          fs.writeFileSync("latest-windows-x86_64.json", JSON.stringify(out, null, 2));
+          fs.writeFileSync("latest.json", JSON.stringify(out, null, 2));
+          console.log("Generated latest-windows-x86_64.json");
+          EOF
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            latest.json
+            latest-windows-x86_64.json
+            app/src-tauri/target/release/bundle/msi/*.msi
+            app/src-tauri/target/release/bundle/nsis/*.exe
+            app/src-tauri/target/release/bundle/**/*.sig
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
